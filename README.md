@@ -1,3 +1,2 @@
-# -hitobito-lab
-
-Hitobito Games のスマホ実機確認用開発ラボ。
+<h1>Hitobito Lab</h1>
+<p>スマホ実機確認用の開発ラボ。</p>
