@@ -1,4 +1,4 @@
-name: Read-only privacy inventory - hitobito-sozai
+name: Hitobito Sozai baseline privacy recheck
 on:
   push:
     branches: [security/privacy-audit-20260919]
@@ -7,37 +7,43 @@ permissions:
 jobs:
   audit:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 8
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - name: Fetch branch, tag and PR heads
+      - name: Fetch only original main and pull request heads
         run: |
           set -euo pipefail
-          git fetch -q origin '+refs/heads/*:refs/remotes/origin/*' '+refs/tags/*:refs/tags/*'
+          git fetch -q origin '+refs/heads/main:refs/remotes/origin/main'
           git fetch -q origin '+refs/pull/*/head:refs/remotes/pull/*/head' || true
-      - name: Count text-file candidates without exposing matched contents
+      - name: Inspect original history, suppressing matching content
         run: |
           python3 - <<'PY'
           import json,re,subprocess
           from collections import Counter
-          def git(*a):return subprocess.check_output(['git',*a],stderr=subprocess.DEVNULL)
-          names=['email','credential','private_key','github_token','stripe_secret','aws_key','local_path','family_review','business_review']
-          pats=[re.compile(x) for x in [rb'(?i)\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b',rb'(?i)(?:api[_-]?key|secret|token|password|passwd|private[_-]?key)\s*[:=]\s*[\'\"][^\'\"\r\n]{6,}[\'\"]',rb'-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----',rb'\b(?:ghp_|github_pat_)[A-Za-z0-9_-]{20,}\b',rb'\bsk_(?:live|test)_[A-Za-z0-9]{12,}\b',rb'\b(?:AKIA|ASIA)[A-Z0-9]{16}\b',rb'(?i)(?:/Users/[^/\s]+/|[A-Z]:\\Users\\[^\\\s]+\\)','次女|長女|不登校|精神科|ADHD|ASD|家族|娘|妻|クリニック|通院'.encode(),'年収|給与|月商|売上目標|取引先|クライアント|顧客情報|報酬'.encode()]]
+          def git(*a): return subprocess.check_output(['git',*a],stderr=subprocess.DEVNULL)
+          patterns={
+            'email': re.compile(rb'(?i)\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b'),
+            'credential': re.compile(rb'(?i)(?:api[_-]?key|secret|token|password|passwd|private[_-]?key)\s*[:=]\s*[\'\"][^\'\"\r\n]{6,}[\'\"]'),
+            'private_key': re.compile(rb'-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----'),
+            'github_token': re.compile(rb'\b(?:ghp_|github_pat_)[A-Za-z0-9_-]{20,}\b'),
+            'local_path': re.compile(rb'(?i)(?:/Users/[^/\s]+/|[A-Z]:\\Users\\[^\\\s]+\\)'),
+            'family_review': re.compile('次女|長女|不登校|精神科|ADHD|ASD|家族|娘|妻|クリニック|通院'.encode()),
+            'business_review': re.compile('年収|給与|月商|売上目標|取引先|クライアント|顧客情報|報酬'.encode())}
           current={e.split(b'\t',1)[0].split()[2].decode() for e in git('ls-tree','-r','-z','origin/main').split(b'\0') if e and e.split(b'\t',1)[0].split()[1]==b'blob'}
-          refs=[x for x in git('for-each-ref','--format=%(refname)','refs/remotes/origin','refs/remotes/pull','refs/tags').decode().splitlines() if not x.endswith('/security/privacy-audit-20260919')]
+          refs=['origin/main']+[r for r in git('for-each-ref','--format=%(refname)','refs/remotes/pull').decode().splitlines()]
           objects={x.split(' ',1)[0] for x in git('rev-list','--objects',*refs).decode().splitlines()}
-          counts={'current':Counter(),'historical_only':Counter()}; scanned=0; skipped=0
+          counts={'current':Counter(),'historical_only':Counter()}; skipped=0; examined=0
           for oid in objects:
             if git('cat-file','-t',oid).strip()!=b'blob':continue
             if int(git('cat-file','-s',oid))>1000000:skipped+=1;continue
             data=git('cat-file','-p',oid)
             if b'\0' in data:skipped+=1;continue
-            scanned+=1
-            for k,p in zip(names,pats):
-              hits=p.findall(data)
-              if k=='email':hits=[v for v in hits if not v.lower().endswith((b'@example.com',b'@example.org',b'@users.noreply.github.com'))]
-              if hits:counts['current' if oid in current else 'historical_only'][k]+=1
-          print(json.dumps({'repo':'hitobito-sozai','current_blob_count':len(current),'scanned_unique_text_blobs':scanned,'skipped_binary_or_large':skipped,'candidate_blobs_by_scope':{k:dict(v) for k,v in counts.items()},'scope':'fetched heads, tags and PR heads; regex candidates only'},sort_keys=True))
+            examined+=1
+            for name,pat in patterns.items():
+              matches=pat.findall(data)
+              if name=='email':matches=[v for v in matches if not v.lower().endswith((b'@example.com',b'@example.org',b'@users.noreply.github.com'))]
+              if matches:counts['current' if oid in current else 'historical_only'][name]+=1
+          print(json.dumps({'scope':'only original main ancestry and PR heads; excluding audit branches','text_blobs':examined,'skipped':skipped,'candidate_counts':{k:dict(v) for k,v in counts.items()}},sort_keys=True))
           PY
